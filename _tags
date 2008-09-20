@@ -1,0 +1,3 @@
+<src/tee.ml>: pp_camlp4o, pkg_unix
+<src/ocaml-tee.byte>: pkg_unix
+<src>: include
