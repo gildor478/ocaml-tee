@@ -1,0 +1,21 @@
+Name:         ocaml-tee
+Version:      0.0.1
+Synopsis:     Redirect command output to a file
+Author:       Sylvain Le Gall
+Copyright:    (C) 2009 Sylvain Le Gall
+LicenseFile:  COPYING.txt
+License:      LGPL-link-exn
+Homepage:     http://ocaml-tee.forge.ocamlcore.org
+BuildDepends: unix
+Plugins:      META
+Description:
+  Library and command line utility like POSIX tee command. It allows to
+  redirect stderr/stdout of a command to a file. Unlike POSIX tee, the file 
+  has a specific format to differentiate time/stdout/stderr.
+
+Library tee
+ Path: src
+ Modules: Tee
+ 
+Executable OCamlTee
+ MainIs: src/OCamlTee.ml

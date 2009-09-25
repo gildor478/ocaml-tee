@@ -1,3 +1,0 @@
-src/tee.cma
-src/tee.$(ocamlbuild_best_library)
-src/ocaml-tee.byte

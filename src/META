@@ -1,0 +1,8 @@
+# AUTOBUILD_START
+# DO NOT EDIT (digest: e8b085346cc39dbe9511915c10a994c7)
+version = "0.0.1"
+requires = "unix"
+description = "Redirect command output to a file"
+archive(byte) = "tee.cma"
+archive(native) = "tee.cmxa"
+# AUTOBUILD_STOP
