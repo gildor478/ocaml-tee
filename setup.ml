@@ -1,5 +1,5 @@
 (* AUTOBUILD_START *)
-(* DO NOT EDIT (digest: b4371f0681a9c28ec1b9a9c3647b276e) *)
+(* DO NOT EDIT (digest: fb11f54ec187de0cbddf425837f85500) *)
 module OASISGettext = struct
 # 21 "/home/gildor/programmation/oasis/src/oasis/OASISGettext.ml"
   
@@ -4130,7 +4130,19 @@ module BaseDev = struct
   
     let safe_exit () = 
       if Sys.file_exists dev_fn then
-        Sys.remove dev_fn
+        Sys.remove dev_fn;
+  
+      (* Restore backup files *)
+      BaseExec.run 
+        ~f_exit_code:(function
+                        | 0 -> () 
+                        | n -> error ~exit:false
+                                 (f_ "'%s setup-clean exit with code %d")
+                                 t.oasis_cmd
+                                 n)
+        t.oasis_cmd 
+        ["-quiet"; "setup-clean"];
+  
     in
   
     let exit_on_child_error = 
@@ -4152,7 +4164,9 @@ module BaseDev = struct
         begin
           try 
   
-            (* TODO: use directly setup-dev *)
+            (* TODO: use directly setup-dev and remove -setup-fn/-backup cli
+             * options 
+             *)
             (* TODO: issue a warning if there is a problem with OASIS call 
              * asking to run OASIS in dev mode by hand.
              *)
@@ -4171,12 +4185,6 @@ module BaseDev = struct
               bootstrap_ocaml
               bootstrap_args;
   
-            (* Restore backup files *)
-            BaseExec.run 
-              ~f_exit_code:exit_on_child_error
-              t.oasis_cmd 
-              ["-quiet"; "setup-clean"];
-  
           with e ->
             error "%s" (string_of_exception e)
         end
@@ -4184,7 +4192,7 @@ module BaseDev = struct
 end
 
 
-# 4190 "setup.ml"
+# 4198 "setup.ml"
 module InternalConfigurePlugin = struct
 # 21 "/home/gildor/programmation/oasis/src/plugins/internal/InternalConfigurePlugin.ml"
   
@@ -4786,7 +4794,7 @@ module InternalInstallPlugin = struct
 end
 
 
-# 4792 "setup.ml"
+# 4800 "setup.ml"
 module OCamlbuildCommon = struct
 # 21 "/home/gildor/programmation/oasis/src/plugins/ocamlbuild/OCamlbuildCommon.ml"
   
@@ -5172,7 +5180,7 @@ module OCamlbuildDocPlugin = struct
 end
 
 
-# 5178 "setup.ml"
+# 5186 "setup.ml"
 open OASISTypes;;
 
 let setup_t =
@@ -5308,6 +5316,11 @@ let setup_t =
      };;
 
 let setup () = BaseSetup.setup setup_t;;
+
+
+let dev_t = {BaseDev.oasis_cmd = "OASIS"; self_fn = "setup.ml"; };;
+
+let setup () = BaseDev.update_and_run dev_t;;
 
 (* AUTOBUILD_STOP *)
 setup ();;
