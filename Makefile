@@ -1,38 +1,39 @@
 
 # AUTOBUILD_START
-# DO NOT EDIT (digest: be1ced7f09a327f0833049658928e932)
+# DO NOT EDIT (digest: bc1e05bfc8b39b664f29dae8dbd3ebbb)
 
 SETUP = ocaml setup.ml
-
-BUILDFLAGS     =
-DOCFLAGS       =
-TESTFLAGS      =
-CLEANFLAGS     =
-DISTCLEANFLAGS =
-CONFIGUREFLAGS =
-INSTALLFLAGS   =
 
 build: setup.data
 	$(SETUP) -build $(BUILDFLAGS)
 
-doc: setup.data
+doc: setup.data build
 	$(SETUP) -doc $(DOCFLAGS)
 
-test: setup.data
+test: setup.data build
 	$(SETUP) -test $(TESTFLAGS)
+
+all: 
+	$(SETUP) -all $(ALLFLAGS)
 
 install: setup.data
 	$(SETUP) -install $(INSTALLFLAGS)
 
-clean:
+uninstall: setup.data
+	$(SETUP) -uninstall $(UNINSTALLFLAGS)
+
+reinstall: setup.data
+	$(SETUP) -reinstall $(REINSTALLFLAGS)
+
+clean: 
 	$(SETUP) -clean $(CLEANFLAGS)
 
-distclean:
+distclean: 
 	$(SETUP) -distclean $(DISTCLEANFLAGS)
 
-setup.data: 
+setup.data:
 	$(SETUP) -configure $(CONFIGUREFLAGS)
 
-.PHONY: build doc test clean distclean install
+.PHONY: build doc test all install uninstall reinstall clean distclean configure
 
 # AUTOBUILD_STOP

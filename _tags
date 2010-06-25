@@ -1,9 +1,10 @@
 # AUTOBUILD_START
-# DO NOT EDIT (digest: 7a9946c80324d53a082201d7d27051ec)
+# DO NOT EDIT (digest: d6242f71f04183d72273ff8b478e7aea)
 # Library tee
-<src/*.ml>: pkg_camlp4
+"src": include
+<src/*.ml{,i}>: pkg_camlp4
 # Executable OCamlTee
-<src/*.ml>: pkg_unix
-<src/OCamlTee.byte>: pkg_unix
+"src/OCamlTee.byte": pkg_unix
+<src/*.ml{,i}>: pkg_unix
 # AUTOBUILD_STOP
 <src/Tee.ml>: syntax_camlp4o

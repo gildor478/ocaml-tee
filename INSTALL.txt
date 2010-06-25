@@ -1,16 +1,16 @@
 (* AUTOBUILD_START *)
-(* DO NOT EDIT (digest: c7d9c65a502d080933066de954037e2e) *)
+(* DO NOT EDIT (digest: 3782d866dd867ab99d54a75f387a05d6) *)
 This is the INSTALL file for the ocaml-tee distribution.
 
-This package use ocaml-autobuild to generate its build system. See section
-ocaml-autobuild for full information. 
+This package uses OASIS to generate its build system. See section OASIS for
+full information. 
 
 Dependencies
 ============
 
 In order to compile this package, you will need:
-* ocamlbuild
-* findlib package unix
+* ocaml
+* findlib
 
 Installing
 ==========
@@ -26,11 +26,11 @@ Uninstalling
 1. Go to the root of the package 
 2. Run 'ocaml setup.ml -uninstall'
 
-ocaml-autobuild 
-===============
+OASIS
+=====
 
-OCaml-autobuild is a software that helps to write setup.ml using a simple
-'_oasis' configuration file. The generated setup only depends on standard
-OCaml installation, no additional library is required.
+OASIS is a software that helps to write setup.ml using a simple '_oasis'
+configuration file. The generated setup only depends on standard OCaml
+installation, no additional library is required.
 
 (* AUTOBUILD_STOP *)

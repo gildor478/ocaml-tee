@@ -1,6 +1,5 @@
 (* AUTOBUILD_START *)
-(* DO NOT EDIT (digest: 6a2f128e73f6fa50e59833ff1cf7376e) *)
+(* DO NOT EDIT (digest: ebf89fa2343855a37224a5e5e4543dc0) *)
 Authors of ocaml-tee
 Sylvain Le Gall
-
 (* AUTOBUILD_STOP *)

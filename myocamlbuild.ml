@@ -1,158 +1,112 @@
 
 (* AUTOBUILD_START *)
-(* DO NOT EDIT (digest: 44a49b654e563b1e700a2ef6b0956411) *)
-module BaseEnvRO =
-struct
-# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseEnvRO.ml"
+(* DO NOT EDIT (digest: b162442f49d2a22e9181c054ee926857) *)
+module BaseEnvLight = struct
+# 21 "/home/gildor/programmation/oasis/src/base/BaseEnvLight.ml"
   
-  (** Read-only environment
-      @author Sylvain Le Gall
+  (** Simple environment, allowing only to read values
     *)
   
-  (** Variable type
-    *)
-  type var_t = string
+  module MapString = Map.Make(String)
   
-  (** Value type
-    *)
-  type val_t = 
-      {
-        order: int;
-        value: string;
-      }
-  
-  (** Read-only environment type
-    *)
-  type env_t = (var_t, val_t) Hashtbl.t
-  
-  (** Get all variable
-    *)
-  let var_all env =
-    List.rev_map
-      snd
-      (List.sort
-         (fun (i1, _) (i2, _) -> i2 - i1)
-         (Hashtbl.fold 
-            (fun nm vl acc -> (vl.order, nm) :: acc)
-            env 
-            []))
-  ;;
-  
-  (** Expand variable that can be found in string. Variable follow definition of
-    * variable for {!Buffer.add_substitute}.
-    *)
-  let rec var_expand env str =
-    let buff =
-      Buffer.create ((String.length str) * 2)
-    in
-      Buffer.add_substitute 
-        buff
-        (fun var -> 
-           try 
-             var_get ~handle_not_found:false var env
-           with Not_found ->
-             failwith 
-               (Printf.sprintf 
-                  "No variable %s defined when trying to expand %S \
-                   (available: %s)"
-                  var 
-                  str 
-                  (String.concat ", " (var_all env))))
-        str;
-      Buffer.contents buff
-  
-  (** Get variable 
-    *)
-  and var_get ?(handle_not_found=true) name env =
-    let vl = 
-      try 
-        (Hashtbl.find env name).value
-      with Not_found when handle_not_found ->
-        failwith 
-          (Printf.sprintf 
-             "No variable %s defined (available: %s)"
-             name
-             (String.concat ", " (var_all env)))
-    in
-      var_expand env vl
-  ;;
+  type t = string MapString.t
   
   (** Environment default file 
     *)
   let default_filename =
     Filename.concat 
-      (Filename.dirname Sys.argv.(0))
+      (Sys.getcwd ())
       "setup.data"
-  ;;
   
-  (** Initialize environment.
+  (** Load environment.
     *)
   let load ?(allow_empty=false) ?(filename=default_filename) () =
-    let env =
-      Hashtbl.create 13
+    if Sys.file_exists filename then
+      begin
+        let chn =
+          open_in_bin filename
+        in
+        let st =
+          Stream.of_channel chn
+        in
+        let line =
+          ref 1
+        in
+        let st_line = 
+          Stream.from
+            (fun _ ->
+               try
+                 match Stream.next st with 
+                   | '\n' -> incr line; Some '\n'
+                   | c -> Some c
+               with Stream.Failure -> None)
+        in
+        let lexer = 
+          Genlex.make_lexer ["="] st_line
+        in
+        let rec read_file mp =
+          match Stream.npeek 3 lexer with 
+            | [Genlex.Ident nm; Genlex.Kwd "="; Genlex.String value] ->
+                Stream.junk lexer; 
+                Stream.junk lexer; 
+                Stream.junk lexer;
+                read_file (MapString.add nm value mp)
+            | [] ->
+                mp
+            | _ ->
+                failwith
+                  (Printf.sprintf
+                     "Malformed data file '%s' line %d"
+                     filename !line)
+        in
+        let mp =
+          read_file MapString.empty
+        in
+          close_in chn;
+          mp
+      end
+    else if allow_empty then
+      begin
+        MapString.empty
+      end
+    else
+      begin
+        failwith 
+          (Printf.sprintf 
+             "Unable to load environment, the file '%s' doesn't exist."
+             filename)
+      end
+  
+  (** Get a variable that evaluate expression that can be found in it (see
+      {!Buffer.add_substitute}.
+    *)
+  let var_get name env =
+    let rec var_expand str =
+      let buff =
+        Buffer.create ((String.length str) * 2)
+      in
+        Buffer.add_substitute 
+          buff
+          (fun var -> 
+             try 
+               var_expand (MapString.find var env)
+             with Not_found ->
+               failwith 
+                 (Printf.sprintf 
+                    "No variable %s defined when trying to expand %S."
+                    var 
+                    str))
+          str;
+        Buffer.contents buff
     in
-      if Sys.file_exists filename then
-        (
-          let chn =
-            open_in_bin filename
-          in
-          let st =
-            Stream.of_channel chn
-          in
-          let line =
-            ref 1
-          in
-          let st_line = 
-            Stream.from
-              (fun _ ->
-                 try
-                   match Stream.next st with 
-                     | '\n' -> incr line; Some '\n'
-                     | c -> Some c
-                 with Stream.Failure -> None)
-          in
-          let lexer = 
-            Genlex.make_lexer ["="] st_line
-          in
-          let rec read_file order =
-            match Stream.npeek 3 lexer with 
-              | [Genlex.Ident nm; Genlex.Kwd "="; Genlex.String value] ->
-                  Stream.junk lexer; 
-                  Stream.junk lexer; 
-                  Stream.junk lexer;
-                  Hashtbl.add env nm {order = order; value = value};
-                  read_file (order + 1)
-              | [] ->
-                  ()
-              | _ ->
-                  failwith 
-                    (Printf.sprintf 
-                       "Malformed data file '%s' line %d"
-                       filename !line)
-          in
-            read_file 0;
-            close_in chn;
-            env
-        )
-      else if allow_empty then
-        (
-          env
-        )
-      else
-        (
-          failwith 
-            (Printf.sprintf 
-               "Unable to load environment, the file '%s' doesn't exist."
-               filename)
-        )
-  ;;
-end;;
+      var_expand (MapString.find name env)
+end
 
 
-# 151 "myocamlbuild.ml"
-module OCamlbuildFindlib =
-struct
-# 1 "/home/gildor/programmation/ocaml-autobuild/src/ocamlbuild/OCamlbuildFindlib.ml"
+# 105 "myocamlbuild.ml"
+module MyOCamlbuildFindlib = struct
+# 21 "/home/gildor/programmation/oasis/src/plugins/ocamlbuild/MyOCamlbuildFindlib.ml"
+  
   (** OCamlbuild extension, copied from 
     * http://brion.inria.fr/gallium/index.php/Using_ocamlfind_with_ocamlbuild
     * by N. Pouillard and others
@@ -217,7 +171,7 @@ struct
       | After_rules ->
           
           (* When one link an OCaml library/binary/package, one should use -linkpkg *)
-          flag ["ocaml"; "link"] & A"-linkpkg";
+          flag ["ocaml"; "link"; "program"] & A"-linkpkg";
           
           (* For each ocamlfind package one inject the -package option when
            * compiling, computing dependencies, generating documentation and
@@ -256,43 +210,67 @@ struct
       | _ -> 
           ()
   
-end;;
+end
 
-module OCamlbuildBase =
-struct
-# 1 "/home/gildor/programmation/ocaml-autobuild/src/ocamlbuild/OCamlbuildBase.ml"
+module MyOCamlbuildBase = struct
+# 21 "/home/gildor/programmation/oasis/src/plugins/ocamlbuild/MyOCamlbuildBase.ml"
   
   (** Base functions for writing myocamlbuild.ml
       @author Sylvain Le Gall
     *)
   
+  
+  
   open Ocamlbuild_plugin
   
-  type dir = string
-  type name = string
+  type dir = string 
+  type name = string 
+  
+# 53 "/home/gildor/programmation/oasis/src/plugins/ocamlbuild/MyOCamlbuildBase.ml"
   
   type t =
       {
         lib_ocaml: (name * dir list) list;
-      }
-  ;;
+        lib_c:     (name * dir) list; 
+        flags:     (string list * spec) list;
+      } 
+  
+  let env_filename =
+    Pathname.basename 
+      BaseEnvLight.default_filename
   
   let dispatch_combine lst =
     fun e ->
       List.iter 
         (fun dispatch -> dispatch e)
         lst 
-  ;;
   
   let dispatch t = 
     function
       | Before_options ->
           let env = 
-            BaseEnvRO.load ~filename:(Pathname.basename BaseEnvRO.default_filename) ()
+            BaseEnvLight.load 
+              ~filename:env_filename 
+              ~allow_empty:true
+              ()
           in
-            Options.ext_obj := BaseEnvRO.var_get "ext_obj" env;
-            Options.ext_lib := BaseEnvRO.var_get "ext_lib" env;
-            Options.ext_dll := BaseEnvRO.var_get "ext_dll" env;
+          let no_trailing_dot s =
+            if String.length s >= 1 && s.[0] = '.' then
+              String.sub s 1 ((String.length s) - 1)
+            else
+              s
+          in
+            List.iter
+              (fun (opt, var) ->
+                 try 
+                   opt := no_trailing_dot (BaseEnvLight.var_get var env)
+                 with Not_found ->
+                   Printf.eprintf "W: Cannot get variable %s" var)
+              [
+                Options.ext_obj, "ext_obj";
+                Options.ext_lib, "ext_lib";
+                Options.ext_dll, "ext_dll";
+              ]
   
       | After_rules -> 
           (* Declare OCaml libraries *)
@@ -308,26 +286,62 @@ struct
                           ["ocaml"; "use_"^lib; "compile"] 
                           (S[A"-I"; P dir]))
                      tl)
-            t.lib_ocaml
+            t.lib_ocaml;
   
+          (* Declare C libraries *)
+          List.iter
+            (fun (lib, dir) ->
+                 (* Handle C part of library *)
+                 flag ["link"; "library"; "ocaml"; "byte"; "use_lib"^lib]
+                   (S[A"-dllib"; A("-l"^lib); A"-cclib"; A("-l"^lib)]);
+  
+                 flag ["link"; "library"; "ocaml"; "native"; "use_lib"^lib]
+                   (S[A"-cclib"; A("-l"^lib)]);
+                      
+                 flag ["link"; "program"; "ocaml"; "byte"; "use_lib"^lib]
+                   (S[A"-dllib"; A("dll"^lib)]);
+  
+                 (* When ocaml link something that use the C library, then one
+                    need that file to be up to date.
+                  *)
+                 dep  ["link"; "ocaml"; "use_lib"^lib] 
+                   [dir/"lib"^lib^"."^(!Options.ext_lib)];
+  
+                 (* Setup search path for lib *)
+                 flag ["link"; "ocaml"; "use_"^lib] 
+                   (S[A"-I"; P(dir)]);
+            )
+            t.lib_c;
+  
+            (* Add flags *)
+            List.iter
+            (fun (tags, spec) ->
+               flag tags & spec)
+            t.flags
       | _ -> 
           ()
-  ;;
   
   let dispatch_default t =
     dispatch_combine 
       [
         dispatch t;
-        OCamlbuildFindlib.dispatch;
+        MyOCamlbuildFindlib.dispatch;
       ]
+  
+end
+
+
+# 333 "myocamlbuild.ml"
+open Ocamlbuild_plugin;;
+let package_default =
+  {
+     MyOCamlbuildBase.lib_ocaml = [("src/tee", ["src"])];
+     lib_c = [];
+     flags = [];
+     }
   ;;
-end;;
 
-
-# 326 "myocamlbuild.ml"
-let package_default = {OCamlbuildBase.lib_ocaml = ([("src/tee", ["src"])]); };;
-
-let dispatch_default = OCamlbuildBase.dispatch_default package_default;;
+let dispatch_default = MyOCamlbuildBase.dispatch_default package_default;;
 
 (* AUTOBUILD_STOP *)
 
