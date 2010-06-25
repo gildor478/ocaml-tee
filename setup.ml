@@ -1,8 +1,577 @@
 (* AUTOBUILD_START *)
-(* DO NOT EDIT (digest: cefc6688d6750364f387b95bc592fba0) *)
+(* DO NOT EDIT (digest: 6b1794243a4f76440aea66a531e6fbd6) *)
+module BaseEnvRO =
+struct
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseEnvRO.ml"
+  
+  (** Read-only environment
+      @author Sylvain Le Gall
+    *)
+  
+  (** Variable type
+    *)
+  type var_t = string
+  
+  (** Value type
+    *)
+  type val_t = 
+      {
+        order: int;
+        value: string;
+      }
+  
+  (** Read-only environment type
+    *)
+  type env_t = (var_t, val_t) Hashtbl.t
+  
+  (** Get all variable
+    *)
+  let var_all env =
+    List.rev_map
+      snd
+      (List.sort
+         (fun (i1, _) (i2, _) -> i2 - i1)
+         (Hashtbl.fold 
+            (fun nm vl acc -> (vl.order, nm) :: acc)
+            env 
+            []))
+  ;;
+  
+  (** Expand variable that can be found in string. Variable follow definition of
+    * variable for {!Buffer.add_substitute}.
+    *)
+  let rec var_expand env str =
+    let buff =
+      Buffer.create ((String.length str) * 2)
+    in
+      Buffer.add_substitute 
+        buff
+        (fun var -> 
+           try 
+             var_get ~handle_not_found:false var env
+           with Not_found ->
+             failwith 
+               (Printf.sprintf 
+                  "No variable %s defined when trying to expand %S \
+                   (available: %s)"
+                  var 
+                  str 
+                  (String.concat ", " (var_all env))))
+        str;
+      Buffer.contents buff
+  
+  (** Get variable 
+    *)
+  and var_get ?(handle_not_found=true) name env =
+    let vl = 
+      try 
+        (Hashtbl.find env name).value
+      with Not_found when handle_not_found ->
+        failwith 
+          (Printf.sprintf 
+             "No variable %s defined (available: %s)"
+             name
+             (String.concat ", " (var_all env)))
+    in
+      var_expand env vl
+  ;;
+  
+  (** Environment default file 
+    *)
+  let default_filename =
+    Filename.concat 
+      (Filename.dirname Sys.argv.(0))
+      "setup.data"
+  ;;
+  
+  (** Initialize environment.
+    *)
+  let load ?(allow_empty=false) ?(filename=default_filename) () =
+    let env =
+      Hashtbl.create 13
+    in
+      if Sys.file_exists filename then
+        (
+          let chn =
+            open_in_bin filename
+          in
+          let st =
+            Stream.of_channel chn
+          in
+          let line =
+            ref 1
+          in
+          let st_line = 
+            Stream.from
+              (fun _ ->
+                 try
+                   match Stream.next st with 
+                     | '\n' -> incr line; Some '\n'
+                     | c -> Some c
+                 with Stream.Failure -> None)
+          in
+          let lexer = 
+            Genlex.make_lexer ["="] st_line
+          in
+          let rec read_file order =
+            match Stream.npeek 3 lexer with 
+              | [Genlex.Ident nm; Genlex.Kwd "="; Genlex.String value] ->
+                  Stream.junk lexer; 
+                  Stream.junk lexer; 
+                  Stream.junk lexer;
+                  Hashtbl.add env nm {order = order; value = value};
+                  read_file (order + 1)
+              | [] ->
+                  ()
+              | _ ->
+                  failwith 
+                    (Printf.sprintf 
+                       "Malformed data file '%s' line %d"
+                       filename !line)
+          in
+            read_file 0;
+            close_in chn;
+            env
+        )
+      else if allow_empty then
+        (
+          env
+        )
+      else
+        (
+          failwith 
+            (Printf.sprintf 
+               "Unable to load environment, the file '%s' doesn't exist."
+               filename)
+        )
+  ;;
+end;;
+
+module BaseEnvRW =
+struct
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseEnvRW.ml"
+  
+  (** Environment for configure variable
+      @author Sylvain Le Gall
+    *)
+  
+  (** Origin of the variable, if a variable has been already set
+      with a higher origin, it won't be set again
+    *)
+  type origin_t = 
+    | ODefault     (** Default computed value *)
+    | OGetEnv      (** Extracted from environment, using Sys.getenv *)
+    | OFileLoad    (** From loading file setup.data *)
+    | OCommandLine (** Set on command line *)
+  ;;
+  
+  (** Command line handling for variable 
+    *)
+  type cli_handle_t =
+    (** No command line argument *)
+    | CLINone
+    (** Build using variable name and help text *)
+    | CLIAuto
+     (** Use prefix --with- *)
+    | CLIWith
+    (** Use --enable/--disable *)
+    | CLIEnable
+    (** Fully define the command line arguments *)
+    | CLIUser of (Arg.key * Arg.spec * Arg.doc) list
+  ;;
+  
+  (** Variable type
+    *)
+  type definition_t =
+      {
+        origin:     origin_t;   
+        hide:       bool;
+        dump:       bool;
+        short_desc: string option;
+        cli:        cli_handle_t;
+        arg_help:   string option;
+        group:      string option;
+      }
+  ;;
+  
+  (** Environment type
+    *)
+  type env_t = 
+      {
+        values:      BaseEnvRO.env_t;
+        definitions: (BaseEnvRO.var_t, definition_t) Hashtbl.t;
+  
+        mutable last_order:   int;
+        mutable print_hidden: bool;
+      }
+  ;;
+  
+  (** See {!BaseEnvRO.var_all}.
+    *)
+  let var_all ?(include_hidden=false) env =
+    List.filter
+      (fun var ->
+         try 
+           let def = 
+             Hashtbl.find env.definitions var
+           in
+             not def.hide || include_hidden 
+         with Not_found ->
+           false)
+      (BaseEnvRO.var_all env.values)
+  ;;
+  
+  (** See {!BaseEnvRO.var_expand}.
+    *)
+  let var_expand env str =
+    BaseEnvRO.var_expand env.values str
+  ;;
+  
+  (** See {!BaseEnvRO.var_get}.
+    *)
+  let var_get ?handle_not_found name env =
+    BaseEnvRO.var_get ?handle_not_found name env.values 
+  ;;
+  
+  (** See {!BaseEnvRO.load}.
+    *)
+  let load ?(filename) ?(allow_empty) () = 
+    let ro = 
+      BaseEnvRO.load ?filename ?allow_empty ()
+    in
+    let last_order = 
+      Hashtbl.fold
+        (fun nm vl last_order -> max vl.BaseEnvRO.order last_order)
+        ro
+        min_int
+    in
+      {
+        values       = ro;
+        definitions  = Hashtbl.create (Hashtbl.length ro);
+        last_order   = last_order;
+        print_hidden = false;
+      }
+  ;;
+  
+  (** Set a variable 
+    *)
+  let var_set 
+        ?(hide=false) 
+        ?(dump=true) 
+        ?short_desc
+        ?(cli=CLINone)
+        ?arg_help
+        ?group 
+        origin 
+        name
+        dflt
+        env =
+  
+      let current_origin = 
+        (* Build value *)
+        try
+          (* Use directly value if it exists *)
+          let vl = 
+            Hashtbl.find env.values name
+          in
+          let current_origin = 
+            try 
+              (Hashtbl.find env.definitions name).origin
+            with Not_found ->
+              (* Comes from BaseEnvRO *)
+              OFileLoad
+          in
+          let value = 
+            if origin > current_origin then 
+              Lazy.force dflt 
+            else 
+              vl.BaseEnvRO.value
+          in
+            Hashtbl.replace env.values name {vl with BaseEnvRO.value = value};
+            current_origin
+  
+        with Not_found ->
+          (
+            let value, origin =
+              (* Use env or default value, depending what is available 
+                 and their priority
+               *)
+              let rec try_value exc_opt =
+                function
+                  | (lzy, origin) :: tl ->
+                      (
+                        try 
+                          Lazy.force lzy, origin
+                        with 
+                          | Not_found -> try_value exc_opt tl
+                          (* If unusual exception is raised, remember it *)
+                          | e -> try_value (Some e) tl
+                      )
+                  | [] ->
+                      (
+                        (* No good value found *)
+                        match exc_opt with 
+                          | Some e -> raise e
+                          | None ->
+                              failwith 
+                                (Printf.sprintf 
+                                   "No default value for variable %s"
+                                   name)
+                      )
+              in
+                try_value 
+                  None
+                  (* Try value in order of origin *)
+                  (List.sort
+                     (fun (_, org1) (_, org2) -> compare org1 org2)
+                     [lazy (Sys.getenv name), OGetEnv; dflt, origin])
+            in
+              env.last_order <- env.last_order + 1;
+              Hashtbl.add 
+                env.values 
+                name 
+                {BaseEnvRO.order = env.last_order; value = value};
+              origin
+          )
+      in
+  
+      (* Use directly definition if it exists *)
+      let def = 
+        try 
+          Hashtbl.find env.definitions name
+        with Not_found ->
+          {
+            origin     = origin;
+            hide       = hide;
+            dump       = dump;
+            short_desc = short_desc;
+            cli        = cli;
+            arg_help   = arg_help;
+            group      = group;
+          }
+      in
+      let no_default default v def_v =
+        if v <> default then
+          v
+        else
+          def_v
+      in
+      let new_def = 
+        {
+           origin     = max origin current_origin;
+           short_desc = no_default None short_desc def.short_desc;
+           cli        = no_default CLINone cli def.cli;
+           arg_help   = no_default None arg_help def.arg_help;
+           hide       = hide || def.hide;
+           dump       = dump && def.dump;
+           group      = no_default None group def.group;
+        }
+      in
+        Hashtbl.replace env.definitions name new_def
+  ;;
+  
+  (** Add a variable to environment and return its value. [hide] allow to store
+      a variable that will be hidden to user (not printed).
+    *)
+  let var_define ?hide ?dump ?short_desc ?cli ?arg_help ?group name dflt env =
+    var_set ?hide ?dump ?short_desc ?cli ?arg_help ?group ODefault name dflt env;
+    var_get name env 
+  ;;
+  
+  (** Well-typed ignore for var_define 
+    *)
+  let var_ignore (e : string) = ();;
+  
+  (** Protect a variable content, to avoid expansion
+    *)
+  let var_protect vl = 
+    let buff = 
+      Buffer.create (String.length vl)
+    in
+      String.iter
+        (function 
+           | '$' -> Buffer.add_string buff "\\$"
+           | c   -> Buffer.add_char   buff c)
+        vl;
+      Buffer.contents buff
+  ;;
+  
+  (** Save environment on disk.
+    *)
+  let dump ?(filename=BaseEnvRO.default_filename) env = 
+    let chn =
+      open_out_bin filename
+    in
+      Hashtbl.iter
+        (fun nm {BaseEnvRO.value = value} -> 
+           let dump = 
+             try 
+               (Hashtbl.find env.definitions nm).dump
+             with Not_found ->
+               true
+           in
+             if dump then
+               Printf.fprintf chn "%s=%S\n" nm value)
+        env.values;
+      close_out chn
+  ;;
+  
+  (** Display environment to user.
+    *)
+  let print env =
+    let printable_vars =
+      List.map 
+        (fun nm -> 
+           let vl = 
+             Hashtbl.find env.values nm
+           in
+           let txt = 
+             try 
+               match (Hashtbl.find env.definitions nm).short_desc with 
+                 | Some s -> s
+                 | None -> nm
+             with Not_found ->
+               nm
+           in
+             txt, vl.BaseEnvRO.value)
+        (var_all ~include_hidden:env.print_hidden env)
+    in
+    let max_length = 
+      List.fold_left
+        (fun mx (name, _) -> max (String.length name) mx)
+        0
+        printable_vars
+    in
+    let dot_pad str =
+      String.make ((max_length - (String.length str)) + 3) '.'
+    in
+  
+    print_newline ();
+    print_endline "Configuration: ";
+    print_newline ();
+    List.iter 
+      (fun (name,value) -> 
+         Printf.printf "%s: %s %s\n" name (dot_pad name) value)
+      printable_vars;
+    Printf.printf "%!";
+    print_newline ();
+  ;;
+  
+  (** Default command line arguments 
+    *)
+  let args env =
+    let tr_arg str =
+      let buff =
+        Buffer.create (String.length str)
+      in
+        String.iter 
+          (function 
+             | '_' | ' ' | '\n' | '\r' | '\t' -> Buffer.add_char buff '-'
+             | c -> Buffer.add_char buff c
+          )
+          str;
+        Buffer.contents buff
+    in
+      [
+        "--override",
+         Arg.Tuple
+           (
+             let rvr = ref ""
+             in
+             let rvl = ref ""
+             in
+               [
+                 Arg.Set_string rvr;
+                 Arg.Set_string rvl;
+                 Arg.Unit (fun () -> var_set OCommandLine !rvr (lazy !rvl) env)
+               ]
+           ),
+        "var+val  Override any configuration variable.";
+  
+        "--print-hidden",
+        Arg.Unit (fun () -> env.print_hidden <- true),
+        " Print even non-printable variable. (debug)";
+      ]
+      @
+      List.flatten 
+        (Hashtbl.fold
+          (fun name def acc ->
+             let var_set s = 
+               var_set OCommandLine name (lazy s) env
+             in
+  
+             let arg_name = 
+               tr_arg name
+             in
+  
+             let hlp =
+               match def.short_desc with 
+                 | Some txt -> txt
+                 | None -> ""
+             in
+  
+             let arg_hlp =
+               match def.arg_help with 
+                 | Some s -> s
+                 | None   -> "str"
+             in
+  
+             let value = 
+               (Hashtbl.find env.values name).BaseEnvRO.value
+             in
+  
+             let args = 
+               match def.cli with 
+                 | CLINone -> 
+                     []
+                 | CLIAuto -> 
+                     [
+                       "--"^arg_name,
+                       Arg.String var_set,
+                       arg_hlp^" "^hlp^" ["^value^"]"
+                     ]
+                 | CLIWith ->
+                     [
+                       "--with-"^arg_name,
+                       Arg.String var_set,
+                       arg_hlp^" "^hlp^" ["^value^"]"
+                     ]
+                 | CLIEnable ->
+                     [
+                       "--enable-"^arg_name,
+                       Arg.Unit (fun () -> var_set "true"),
+                       " "^hlp^(if value = "true" then " [default]" else "");
+  
+                       "--disable-"^arg_name,
+                       Arg.Unit (fun () -> var_set "false"),
+                       " "^hlp^(if value <> "true" then " [default]" else "");
+                     ]
+                 | CLIUser lst ->
+                     lst
+             in
+               args :: acc)
+           env.definitions
+           [])
+  ;;
+  
+end;;
+
 module BaseUtils =
 struct
-# 1 "src/base/BaseUtils.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseUtils.ml"
+  
+  
+  (** Set for String 
+    *)
+  module SetString = Set.Make(String)
+  
+  (** Build a set out of list 
+    *)
+  let set_string_of_list =
+    List.fold_left
+      (fun st e -> SetString.add e st)
+      SetString.empty
+  
   
   (** Remove trailing whitespace *)
   let strip_whitespace str =
@@ -85,7 +654,7 @@ end;;
 
 module BaseMessage =
 struct
-# 1 "src/base/BaseMessage.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseMessage.ml"
   
   (** Message to user
       @author Sylvain Le Gall
@@ -142,7 +711,7 @@ end;;
 
 module BaseExec =
 struct
-# 1 "src/base/BaseExec.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseExec.ml"
   
   (** Running commands 
       @author Sylvain Le Gall
@@ -215,7 +784,7 @@ end;;
 
 module BaseFileUtil =
 struct
-# 1 "src/base/BaseFileUtil.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseFileUtil.ml"
   
   (** {1 File operation (install, which...)
     *)
@@ -309,384 +878,22 @@ struct
   ;;
 end;;
 
-module BaseEnvironment =
-struct
-# 1 "src/base/BaseEnvironment.ml"
-  
-  (** Environment for configure variable
-      @author Sylvain Le Gall
-    *)
-  
-  module Msg    = BaseMessage;;
-  module MapVar = Map.Make(String);;
-  module SetVar = Set.Make(String);;
-  
-  (** Variable type
-    *)
-  type definition =
-      {
-        default: env -> string * env;
-        hidden:  bool;
-      }
-  
-  (** Environment type
-    *)
-  and env = 
-      {
-        defined:      definition MapVar.t;
-        value:        string MapVar.t;
-        print_hidden: bool;
-      }
-  ;;
-  
-  (** Add a variable to environment. [hide] allow to store
-    * a variable that will be hidden to user (not printed).
-    *)
-  let var_define ?(hide=false) name dflt env =
-    if not (MapVar.mem name env.defined) then
-      {
-        env with 
-            defined = MapVar.add 
-                        name 
-                        {default = dflt; hidden = hide} 
-                        env.defined;
-      }
-    else
-      failwith 
-        (Printf.sprintf
-           "Variable %S is already defined"
-           name)
-  ;;
-  
-  (** Set value of a variable 
-    *)
-  let var_set name value env =
-    if MapVar.mem name env.defined then
-      {
-        env with
-            value = MapVar.add name value env.value;     
-      }
-    else
-      failwith 
-        (Printf.sprintf 
-           "Cannot set variable %S because it is not defined" 
-           name)
-  ;;
-  
-  (** Retrieve the value of a variable
-    *)
-  let var_get ?(mandatory=false) name env =
-    try 
-      MapVar.find name env.value, env
-    with Not_found ->
-      (
-        try
-          let def = 
-            MapVar.find name env.defined
-          in
-          let dflt, env = 
-            def.default env
-          in
-            if not def.hidden then 
-              (
-                Msg.checking name;
-                Msg.result dflt
-              );
-            dflt, var_set name dflt env
-        with Not_found ->
-          (
-            if mandatory then
-              failwith
-                (Printf.sprintf 
-                   "Variable %S not defined"
-                   name)
-            else
-              raise Not_found
-          )
-      )
-  ;;
-  
-  (** Try to get a variable value from environment and if it fails
-    * compute it and store it in environment.
-    *)
-  let var_cache ?(hide) name dflt env =
-    try 
-      var_get name env
-    with Not_found ->
-      var_get name (var_define ?hide name dflt env)
-  ;;
-  
-  (** Get all variable
-    *)
-  let var_all ?(include_hidden=false) ~include_unset env =
-    (* Extract variable that have been set and return
-     * a map containing defined value that have not 
-     * been set yet.
-     *)
-    let varset_lst, vardflt_mp =
-      MapVar.fold
-        (fun name value (varset_lst, vardflt_mp) ->
-           (* We look if each var is hidden or not *)
-           try
-             let def =
-               MapVar.find name vardflt_mp
-             in
-             let vardflt_mp =
-               (* We won't need this var in the future *)
-               MapVar.remove name vardflt_mp
-             in
-               if include_hidden || (not def.hidden) then
-                 name :: varset_lst, vardflt_mp
-               else
-                 varset_lst, vardflt_mp
-           with Not_found ->
-             (* No definition we display it *)
-             name :: varset_lst, vardflt_mp)
-        env.value
-        ([], env.defined)
-    in
-  
-      if include_unset then
-        (
-          (* Combine set var with defaulted var *)
-          MapVar.fold
-            (fun name def lst ->
-               if include_hidden || (not def.hidden) then
-                 name :: lst
-               else
-                 lst)
-            vardflt_mp
-            varset_lst
-        )
-      else
-        (
-          varset_lst
-        )
-  ;;
-  
-  (** Expand variable that can be found in string. Variable follow definition of
-    * variable for {!Buffer.add_substitute}.
-    *)
-  let rec var_expand renv str =
-    let all_vars () =
-      String.concat ", " (var_all ~include_unset:true !renv)
-    in
-    let buff =
-      Buffer.create ((String.length str) * 2)
-    in
-      Buffer.add_substitute 
-        buff
-        (fun var -> 
-           try 
-             let value, env = 
-               var_get var !renv
-             in
-               renv := env;
-               var_expand renv value
-           with Not_found ->
-             failwith 
-               (Printf.sprintf 
-                  "No variable %s defined when trying to expand %S \
-                   (available: %s)"
-                  str var (all_vars ()))) 
-        str;
-      Buffer.contents buff
-  ;;
-  
-  (** Retrieve a variable value, without taking into account
-      environment modification (even warning about it). Variable
-      must be defined.
-    *)
-  let get env nm = 
-    let vl, env' =
-      var_get ~mandatory:true nm env
-    in
-      if env <> env' then
-        Msg.warning 
-          (Printf.sprintf 
-             "Evaluation of variable '%s' lead to unexpected \
-              environment modification"
-             nm);
-      vl
-  ;;
-  
-  (** Environment file 
-    *)
-  let filename =
-    Filename.concat 
-      (Filename.dirname Sys.argv.(0))
-      "setup.data"
-  ;;
-  
-  (** Save environment on disk.
-    *)
-  let dump env = 
-    let chn =
-      open_out_bin filename
-    in
-    let _env: env =
-      List.fold_left 
-        (fun env nm -> 
-           let vl, env = 
-             var_get nm env 
-           in
-             Printf.fprintf chn "%s = %S\n" nm vl;
-             env)
-        env
-        (var_all ~include_hidden:true ~include_unset:false env)
-    in
-      close_out chn
-  ;;
-  
-  (** Initialize environment.
-    *)
-  let load ?(allow_empty=false) () = 
-    let default =
-        {
-          defined      = MapVar.empty;
-          value        = MapVar.empty;
-          print_hidden = false;
-        }
-    in
-      if Sys.file_exists filename then
-        (
-          let chn =
-            open_in_bin filename
-          in
-          let st =
-            Stream.of_channel chn
-          in
-          let line =
-            ref 1
-          in
-          let st_line = 
-            Stream.from
-              (fun _ ->
-                 try
-                   match Stream.next st with 
-                     | '\n' -> incr line; Some '\n'
-                     | c -> Some c
-                 with Stream.Failure -> None)
-          in
-          let lexer = 
-            Genlex.make_lexer ["="] st_line
-          in
-          let rec read_file mp =
-            match Stream.npeek 3 lexer with 
-              | [Genlex.Ident nm; Genlex.Kwd "="; Genlex.String vl] ->
-                  Stream.junk lexer; 
-                  Stream.junk lexer; 
-                  Stream.junk lexer;
-                  read_file (MapVar.add nm vl mp)
-              | [] ->
-                  mp
-              | _ ->
-                  failwith 
-                    (Printf.sprintf 
-                       "Malformed data file '%s' line %d"
-                       filename !line)
-          in
-          let mp =
-            read_file default.value
-          in
-            close_in chn;
-            {default with value = mp}
-        )
-      else if allow_empty then
-        (
-          default
-        )
-      else
-        (
-          failwith 
-            (Printf.sprintf 
-               "Unable to load environment file '%s', maybe run '%s -configure'"
-               filename
-               Sys.argv.(0))
-        )
-  ;;
-  
-  (** Display environment to user.
-    *)
-  let print env =
-    let printable_vars, env =
-      List.fold_left
-        (fun (acc, env) nm ->
-           let vl, env =
-             var_get nm env
-           in
-             ((nm, vl) ::  acc), env)
-        ([], env)
-        (var_all ~include_hidden:env.print_hidden ~include_unset:false env)
-    in
-    let max_length = 
-      List.fold_left
-        (fun mx (name, _) -> max (String.length name) mx)
-        0
-        printable_vars
-    in
-    let dot_pad str =
-      String.make ((max_length - (String.length str)) + 3) '.'
-    in
-  
-    print_newline ();
-    print_endline "Configuration: ";
-    print_newline ();
-    List.iter 
-      (fun (name,value) -> 
-         Printf.printf "%s: %s %s\n" name (dot_pad name) value)
-      printable_vars;
-    print_newline ();
-  ;;
-  
-  (** Equality between two environment 
-    *)
-  let equal env1 env2 =
-    (MapVar.equal (=) env1.value env2.value)
-  ;;
-  
-  (** Default command line arguments 
-    *)
-  let args renv =
-    [
-      "--override",
-       Arg.Tuple
-         (
-           let rvr = ref ""
-           in
-           let rvl = ref ""
-           in
-             [
-               Arg.Set_string rvr;
-               Arg.Set_string rvl;
-               Arg.Unit (fun () -> renv := var_set !rvr !rvl !renv)
-             ]
-         ),
-      "var+val  Override any configuration variable";
-  
-      "--print-hidden",
-      Arg.Unit (fun () -> renv := {!renv with print_hidden = true}),
-      " Print even non-printable variable (debug)";
-    ]
-  ;;
-  
-end;;
-
 module BaseExpr =
 struct
-# 1 "src/base/BaseExpr.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseExpr.ml"
   
   (** Conditional expression like in OASIS.
       @author Sylvain Le Gall
     *)
   
-  open BaseEnvironment;;
+  open BaseEnvRW;;
   
   type t =
     | Bool of bool
     | Not of t
     | And of t * t
     | Or of t * t
+    (* TODO: use a var here *)
     | Flag of string
     | Test of string * string
   ;;
@@ -698,153 +905,61 @@ struct
   let rec eval env =
     function
       | Bool b ->
-          b, env
+          b
+  
       | Not e -> 
-          let v, env =
-            eval env e 
-          in
-            not v, env
+          not (eval env e)
+  
       | And (e1, e2) ->
-          let (v1, env) as res =
-            eval env e1
-          in
-            if v1 then
-              eval env e2
-            else
-              res
+          (eval env e1) && (eval env e2)
+  
       | Or (e1, e2) -> 
-          let (v1, env) as res =
-            eval env e1
-          in
-            if not v1 then
-              eval env e2
-            else
-              res
+          (eval env e1) || (eval env e2)
+  
       | Flag nm ->
-          let v, env =
-            var_get nm env
-          in
-          let renv =
-            ref env
-          in
           let v =
-            var_expand renv v
-          in
-          let env = 
-            !renv
+            var_get nm env
           in
             assert(v = "true" || v = "false");
-            (v = "true"), env
+            (v = "true")
+  
       | Test (nm, vl) ->
-          let v, env =
+          let v =
             var_get nm env
           in
-          let renv =
-            ref env
-          in
-          let v =
-            var_expand renv v
-          in
-          let env = 
-            !renv
-          in
-            (v = vl), env
+            (v = vl)
   ;;
   
   let choose lst env =
-    let res, env =
+    let res =
       List.fold_left
-        (fun (res, env) (cond, vl) ->
-           let res_cond, env =
-             eval env cond
-           in
-             (if res_cond then Some vl else res), env)
-        (None, env)
+        (fun res (cond, vl) ->
+           if eval env cond then Some vl else res)
+        None
         lst
     in
       match res with 
         | Some vl ->
-            vl, env
+            vl
         | None ->
             failwith "No result for a choice list"
+  ;;
+  
+  let singleton e = 
+    [Bool true, e]
   ;;
   
 end;;
 
 module BaseArgExt =
 struct
-# 1 "src/base/BaseArgExt.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseArgExt.ml"
   
   (** Handle command line argument
       @author Sylvain Le Gall
     *)
   
-  open BaseEnvironment;;
-  
-  let tr_arg str =
-    let buff =
-      Buffer.create (String.length str)
-    in
-      String.iter 
-        (function 
-           | '_' | ' ' | '\n' | '\r' | '\t' -> Buffer.add_char buff '-'
-           | c -> Buffer.add_char buff c
-        )
-        str;
-      Buffer.contents buff
-  ;;
-  
-  let enable name hlp default_choices renv =
-    let arg_name =
-      tr_arg name
-    in
-    let env =
-      !renv
-    in
-    let default, env =
-      BaseExpr.choose default_choices env
-    in
-    let default_str =
-      if default then "true" else "false"
-    in
-    let env =
-      var_set
-        name
-        default_str
-        (var_define name (fun env -> default_str, env) env)
-    in
-      renv := env;
-      [
-        "--enable-"^arg_name,
-        Arg.Unit (fun () -> renv := var_set name "true" !renv),
-        " Enable "^hlp^(if default then " [default]" else "");
-  
-        "--disable-"^arg_name,
-        Arg.Unit (fun () -> renv := var_set name "false" !renv),
-        " Disable "^hlp^(if not default then " [default]" else "");
-      ]
-  ;;
-   
-  let wth name hlp default renv =
-    let dflt env = 
-      let renv' =
-        ref env
-      in
-      let v =
-        var_expand renv' default
-      in
-        v, !renv'
-    in
-      renv := var_set
-                name
-                default
-                (var_define name dflt !renv); 
-      [
-        "--with-"^(tr_arg name),
-        Arg.String (fun str -> renv := var_set name str !renv),
-        hlp^" ["^default^"]"
-      ]
-  ;;
+  open BaseEnvRW;;
   
   let parse argv args env =
       (* Simulate command line for Arg *)
@@ -852,135 +967,24 @@ struct
         ref 0
       in
   
-      let renv = 
-        ref env
-      in
-      let args =
-        List.flatten
-          (List.map 
-             (fun fargs -> fargs renv)
-             args)
-      in
-        (
-          try
-            Arg.parse_argv
-              ~current:current
-              (Array.concat [[|"none"|]; argv])
-              (Arg.align args)
-              (fun str -> 
-                 failwith 
-                   ("Don't know what to do with arguments: '"^str^"'"))
-              "configure options:"
-          with Arg.Help txt | Arg.Bad txt ->
-            BaseMessage.error txt
-        );
-        !renv
+        try
+          Arg.parse_argv
+            ~current:current
+            (Array.concat [[|"none"|]; argv])
+            (Arg.align args)
+            (fun str -> 
+               failwith 
+                 ("Don't know what to do with arguments: '"^str^"'"))
+            "configure options:"
+        with Arg.Help txt | Arg.Bad txt ->
+          BaseMessage.error txt
   ;;
   
-  let default =
-    (* Standard paths *)
-    let lst =
-      [
-        "prefix",
-        "install architecture-independent files dir",
-        (match Sys.os_type with
-           | "Win32" ->
-               "%PROGRAMFILES%\\$pkg_name"
-           | _ ->
-               "/usr/local"
-        );
-        
-        "eprefix",
-        "Install architecture-dependent files in dir",
-        "$prefix";
-  
-        "bindir",
-        "User executables",
-        Filename.concat "$eprefix" "bin";
-  
-        "sbindir",
-        "System admin executables",
-        Filename.concat "$eprefix" "sbin";
-  
-        "libexecdir",
-        "Program executables",
-        Filename.concat "$eprefix" "libexec";
-  
-        "sysconfdir",
-        "Read-only single-machine data",
-        Filename.concat "$prefix" "etc";
-  
-        "sharedstatedir",
-        "Modifiable architecture-independent data",
-        Filename.concat "$prefix" "com";
-  
-        "localstatedir",
-        "Modifiable single-machine data",
-        Filename.concat "$prefix" "var";
-  
-        "libdir",
-        "Object code libraries",
-        Filename.concat "$eprefix" "lib";
-  
-        "datarootdir",
-        "Read-only arch.-independent data root",
-        Filename.concat "$prefix" "share";
-  
-        "datadir",
-        "Read-only architecture-independent data",
-        "$datarootdir";
-  
-        "infodir",
-        "Info documentation",
-        Filename.concat "$datarootdir" "info";
-  
-        "localedir",
-        "Locale-dependent data",
-        Filename.concat "$datarootdir" "locale";
-  
-        "mandir",
-        "Man documentation",
-        Filename.concat "$datarootdir" "man";
-  
-        "docdir",
-        "Documentation root",
-        Filename.concat (Filename.concat "$datarootdir" "doc") "$pkg_name";
-  
-        "htmldir",
-        "HTML documentation",
-        "$docdir";
-  
-        "dvidir",
-        "DVI documentation",
-        "$docdir";
-  
-        "pdfdir",
-        "PDF documentation",
-        "$docdir";
-  
-        "psdir",
-        "PS documentation",
-        "$docdir";
-      ]
-    in
-      fun renv ->
-        List.fold_left
-          (fun acc (name, hlp, dflt) ->
-             renv := var_define name (fun env -> dflt, env) !renv;
-             (
-               "--"^name,
-               Arg.String (fun str -> renv := var_set name str !renv),
-               "dir "^hlp^" ["^dflt^"]"
-             ) :: acc
-          )
-          (BaseEnvironment.args renv)
-          lst
-  ;;
 end;;
 
 module BaseVersion =
 struct
-# 1 "src/base/BaseVersion.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseVersion.ml"
   
   (** Version comparisons
       @author Sylvain Le Gall
@@ -1094,12 +1098,12 @@ end;;
 
 module BaseCheck =
 struct
-# 1 "src/base/BaseCheck.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseCheck.ml"
   
   (** {1 Checking for particular features} 
     *)
   
-  module Env = BaseEnvironment;;
+  open BaseEnvRW;;
   module Ver = BaseVersion;;
   module Msg = BaseMessage;;
   
@@ -1107,25 +1111,25 @@ struct
     * the first found is returned. 
     *)
   let prog_best prg prg_lst =
-    Env.var_cache prg
-      (fun env ->
-         let alternate = 
-           List.fold_left 
-             (fun res e ->
-                match res with 
-                  | Some _ -> res
-                  | None ->
-                      try
-                        Some (BaseFileUtil.which e)
-                      with Not_found ->
-                        None)
-             None
-             prg_lst
-         in
-           match alternate with
-             | Some prg -> prg, env
-             | None -> raise Not_found
-      )
+    var_define
+      prg 
+      (lazy 
+         (let alternate = 
+            List.fold_left 
+              (fun res e ->
+                 match res with 
+                   | Some _ -> res
+                   | None ->
+                       try
+                         Some (BaseFileUtil.which e)
+                       with Not_found ->
+                         None)
+              None
+              prg_lst
+          in
+            match alternate with
+              | Some prg -> prg
+              | None -> raise Not_found))
   ;;
   
   (** Check the presence of a particular program.
@@ -1140,40 +1144,50 @@ struct
     prog_best prg [prg^".opt"; prg]
   ;;
   
+  let ocamlfind = prog "ocamlfind";;
+  
   (** Check version, following Sys.ocaml_version convention
     *)
-  let version feature var_prefix (str_cmp, cmp, var_cmp) fversion = 
+  let version 
+        var_prefix 
+        (str_cmp, cmp, var_cmp) 
+        fversion 
+        env = 
     (* Really compare version provided *)
     let var = 
       var_prefix^"_version_"^var_cmp
     in
-      Env.var_cache ~hide:true var
-        (fun env ->
-           let () = 
-             Msg.checking (feature^" version "^str_cmp);
-           in
-           let version, env =
-             match fversion env with 
-               | "[Distributed with OCaml]", env ->
-                   (* TODO: this is not sure ! *)
-                   Sys.ocaml_version, env
-               | res ->
-                   res
-           in
-             if Ver.comparator_apply version cmp then
-               version, env
-             else
-               raise Not_found
-        )
+      var_define 
+        ~hide:true 
+        var
+        (lazy
+           (let version =
+              match fversion env with 
+                | "[Distributed with OCaml]" ->
+                    (var_get "ocaml_version" env)
+                | res ->
+                    res
+            in
+              prerr_endline version;
+              if Ver.comparator_apply version cmp then
+                version
+              else
+                failwith 
+                  (Printf.sprintf
+                     "Cannot satisfy version constraint on %s: %s (version: %s)"
+                     var_prefix
+                     str_cmp
+                     version)))
+        env
   ;;
   
   (** Check for findlib package
     *)
-  let package ?version_comparator pkg =
+  let package ?version_comparator pkg env =
     let findlib_dir pkg = 
       let dir = 
         BaseExec.run_read_one_line
-          "ocamlfind"
+          (ocamlfind env)
           ["query"; "-format"; "%d"; pkg]
       in
         if Sys.is_directory dir then
@@ -1187,71 +1201,53 @@ struct
     in
     let findlib_version pkg =
       BaseExec.run_read_one_line 
-        "ocamlfind"
+        (ocamlfind env)
         ["query"; "-format"; "%v"; pkg]
     in
-    Env.var_cache ("pkg_"^pkg)
-      (fun env ->
-         let default_msg =
-           "findlib package "^pkg
-         in
-         let () = 
-           Msg.checking default_msg
-         in
-         let dir =
-           findlib_dir pkg
-         in
-           match version_comparator with 
-             | Some ver_cmp ->
-                 (
-                   let _, env = 
-                     version 
-                       default_msg 
-                       ("pkg_"^pkg)
-                       ver_cmp
-                       (fun env -> 
-                          findlib_version pkg, env)
-                       env
-                   in
-                     dir, env
-                 )
-             | None -> 
-                 dir, env
-      )
+    let vl =
+      var_define
+        ("pkg_"^pkg)
+        (lazy (findlib_dir pkg))
+        env
+    in
+      (
+        match version_comparator with 
+          | Some ver_cmp ->
+              var_ignore
+                (version 
+                   ("pkg_"^pkg)
+                   ver_cmp
+                   (fun _ -> findlib_version pkg)
+                   env)
+          | None -> 
+              ()
+      );
+      vl
   ;;
   
   (** Run checks *)
   let run checks env =
-    List.fold_left
-      (fun env chk -> snd (chk env))
-      env
+    List.iter
+      (fun chk -> var_ignore (chk env))
       checks
   ;;
 end;;
 
 module BaseOCamlcConfig =
 struct
-# 1 "src/base/BaseOCamlcConfig.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseOCamlcConfig.ml"
   
   (** Read output of command ocamlc -config and transform it
     * into enviornment variable
     *)
   
-  open BaseEnvironment;;
+  open BaseEnvRW;;
   
   module SMap = Map.Make(String);;
   
-  let config =
-    [
-      "os_type";
-      "system";
-      "architecture";
-      "ccomp_type";
-      "ocaml_version";
-    ]
-  ;;
+  let ocamlc = BaseCheck.prog_opt "ocamlc";;
   
-  let ocamlc_config_map ocamlc =
+  let ocamlc_config_map env =
     (* Map name to value for ocamlc -config output 
        (name ^": "^value) 
      *)
@@ -1273,7 +1269,10 @@ struct
                       in
                       let value =
                         if linelen > pos_semicolon + 2 then
-                          String.sub line (pos_semicolon + 2) (linelen - pos_semicolon - 2)
+                          String.sub 
+                            line 
+                            (pos_semicolon + 2) 
+                            (linelen - pos_semicolon - 2)
                         else
                           ""
                       in
@@ -1293,164 +1292,290 @@ struct
             mp
     in
   
-      var_cache
+      var_define
         "ocamlc_config_map"
         ~hide:true
-        (fun env ->
-           let ocamlc, env =
-             ocamlc env
-           in
-           let map =
-             split_field 
-               SMap.empty
-               (BaseExec.run_read_output 
-                  ocamlc
-                  ["-config"])
-           in
-           (Marshal.to_string map []), env)
+        ~dump:false
+        (lazy
+           (var_protect
+              (Marshal.to_string
+                 (split_field 
+                    SMap.empty
+                    (BaseExec.run_read_output (ocamlc env) ["-config"]))
+                 [])))
+        env
   ;;
   
-  let var_cache ocamlc nm =
+  let var_cache nm env =
     (* Extract data from ocamlc -config *)
     let avlbl_config_get env = 
-      let map_marshal, env =
-        ocamlc_config_map ocamlc env
+      let map_marshal =
+        ocamlc_config_map env
       in
-        (Marshal.from_string map_marshal 0), env
+        Marshal.from_string map_marshal 0
     in
     let nm_config =
       match nm with 
         | "ocaml_version" -> "version"
         | _ -> nm
     in
-      var_cache
+      var_define
         nm 
-        (fun env -> 
-           try
-             let map, env =
-               avlbl_config_get env
-             in
-             let value = 
-               SMap.find nm_config map
-             in
-               value, env
-           with Not_found ->
-             failwith
-               (Printf.sprintf 
-                  "Cannot find field '%s' in '%s -config' output"
-                  nm
-                  (fst (ocamlc env))))
+        (lazy
+          (try
+              let map =
+                avlbl_config_get env
+              in
+              let value = 
+                SMap.find nm_config map
+              in
+                value
+            with Not_found ->
+              failwith
+                (Printf.sprintf 
+                   "Cannot find field '%s' in '%s -config' output"
+                   nm
+                   (ocamlc env))))
+        env
   ;;
   
 end;;
 
 module BaseStandardVar =
 struct
-# 1 "src/base/BaseStandardVar.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseStandardVar.ml"
   
   (** Most standard variables for OCaml 
       @author Sylvain Le Gall
     *)
   
   open BaseCheck;;
+  open BaseEnvRW;;
   
-  let ocamlc   = prog_opt "ocamlc";;
-  let ocamlopt = prog_opt "ocamlopt";;
+  (** {2 Paths} *)
   
-  let (ocaml_version,
-       standard_library_default,
-       standard_library,
-       standard_runtime,
-       ccomp_type,
-       bytecomp_c_compiler,
-       bytecomp_c_linker,
-       bytecomp_c_libraries,
-       native_c_compiler,
-       native_c_linker,
-       native_c_libraries,
-       native_partial_linker,
-       ranlib,
-       cc_profile,
-       architecture,
-       model,
-       system,
-       ext_obj,
-       ext_asm,
-       ext_lib,
-       ext_dll,
-       os_type,
-       default_executable_name,
-       systhread_supported) =
-    let c = 
-      BaseOCamlcConfig.var_cache ocamlc
-    in
-      c "version",
-      c "standard_library_default",
-      c "standard_library",
-      c "standard_runtime",
-      c "ccomp_type",
-      c "bytecomp_c_compiler",
-      c "bytecomp_c_linker",
-      c "bytecomp_c_libraries",
-      c "native_c_compiler",
-      c "native_c_linker",
-      c "native_c_libraries",
-      c "native_partial_linker",
-      c "ranlib",
-      c "cc_profile",
-      c "architecture",
-      c "model",
-      c "system",
-      c "ext_obj",
-      c "ext_asm",
-      c "ext_lib",
-      c "ext_dll",
-      c "os_type",
-      c "default_executable_name",
-      c "systhread_supported"
-  ;;
+  (**/**)
+  let p name hlp dflt = 
+    var_define
+      ~short_desc:hlp 
+      ~cli:CLIAuto 
+      ~arg_help:"dir" 
+      name 
+      (lazy dflt) 
+  
+  let (/) = Filename.concat
+  
+  (**/**)
+  
+  let prefix = 
+    p "prefix"
+      "install architecture-independent files dir"
+      (match Sys.os_type with
+         | "Win32" ->
+             "%PROGRAMFILES%\\$pkg_name"
+         | _ ->
+             "/usr/local")
+        
+  let exec_prefix = 
+    p "exec_prefix"
+      "Install architecture-dependent files in dir"
+      "$prefix"
+  
+  let bindir =
+    p "bindir"
+      "User executables"
+      ("$exec_prefix"/"bin")
+  
+  let sbindir =
+    p "sbindir"
+      "System admin executables"
+      ("$exec_prefix"/"sbin")
+  
+  let libexecdir =
+    p "libexecdir"
+      "Program executables"
+      ("$exec_prefix"/"libexec")
+  
+  let sysconfdir =
+    p "sysconfdir"
+      "Read-only single-machine data"
+      ("$prefix"/"etc")
+  
+  let sharedstatedir =
+    p "sharedstatedir"
+      "Modifiable architecture-independent data"
+      ("$prefix"/"com")
+  
+  let localstatedir =
+    p "localstatedir"
+      "Modifiable single-machine data"
+      ("$prefix"/"var")
+  
+  let libdir =
+    p "libdir"
+      "Object code libraries"
+      ("$exec_prefix"/"lib")
+  
+  let datarootdir =
+    p "datarootdir"
+      "Read-only arch.-independent data root"
+      ("$prefix"/"share")
+  
+  let datadir =
+    p "datadir"
+      "Read-only architecture-independent data"
+      "$datarootdir"
+  
+  let infodir =
+    p "infodir"
+      "Info documentation"
+      ("$datarootdir"/"info")
+  
+  let localedir =
+    p "localedir"
+      "Locale-dependent data"
+      ("$datarootdir"/"locale")
+  
+  let mandir =
+    p "mandir"
+      "Man documentation"
+      ("$datarootdir"/"man")
+  
+  let docdir =
+    p "docdir"
+      "Documentation root"
+      ("$datarootdir"/"doc"/"$pkg_name")
+  
+  let htmldir =
+    p "htmldir"
+      "HTML documentation"
+      "$docdir"
+  
+  let dvidir =
+    p "dvidir"
+      "DVI documentation"
+      "$docdir"
+  
+  let pdfdir =
+    p "pdfdir"
+      "PDF documentation"
+      "$docdir"
+  
+  let psdir =
+    p "psdir"
+      "PS documentation"
+      "$docdir"
+  
+  (** {2 Programs} *)
+  
+  let ocamlfind  = BaseCheck.ocamlfind
+  let ocamlc     = BaseOCamlcConfig.ocamlc
+  let ocamlopt   = prog_opt "ocamlopt"
+  let ocamlbuild = prog "ocamlbuild"
+  
+  
+  (** {2 OCaml config variable} *) 
+  
+  let c = BaseOCamlcConfig.var_cache 
+  
+  let ocaml_version            = c "version"
+  let standard_library_default = c "standard_library_default"
+  let standard_library         = c "standard_library"
+  let standard_runtime         = c "standard_runtime"
+  let ccomp_type               = c "ccomp_type"
+  let bytecomp_c_compiler      = c "bytecomp_c_compiler"
+  let native_c_compiler        = c "native_c_compiler"
+  let architecture             = c "architecture"
+  let model                    = c "model"
+  let system                   = c "system"
+  let ext_obj                  = c "ext_obj"
+  let ext_asm                  = c "ext_asm"
+  let ext_lib                  = c "ext_lib"
+  let ext_dll                  = c "ext_dll"
+  let os_type                  = c "os_type"
+  let default_executable_name  = c "default_executable_name"
+  let systhread_supported      = c "systhread_supported"
+  
+  (** {2 ...} *)
   
   (** Check what is the best target for platform (opt/byte)
     *)
-  let ocamlbest =
-    Env.var_cache "ocamlbest"
-      (fun env ->
-         try
-           "native", snd (ocamlopt env)
-         with Not_found ->
-           "byte", snd (ocamlc env))
-  ;;
+  let ocamlbest env =
+    var_define
+      "ocamlbest"
+      (lazy 
+         (try
+            var_ignore (ocamlopt env);
+            "native"
+          with Not_found ->
+            (var_ignore (ocamlc env);
+             "byte")))
+      env
   
   (** Compute the default suffix for program (target OS dependent)
     *)
-  let suffix_program =
-    Env.var_cache "suffix_program"
-      (fun env ->
-         let os_type, env =
-           os_type env
-         in
-           (match os_type with 
-              | "Win32" -> ".exe" 
-              | _ -> ""
-           ),
-           env
-      )
-  ;;
+  let suffix_program env =
+    var_define
+      "suffix_program"
+      (lazy
+         (match os_type env with 
+            | "Win32" -> ".exe" 
+            | _ -> ""
+         ))
+      env
   
-  (** Check against a minimal version.
+  (** All variables 
     *)
-  let ocaml_version_constraint version_cmp env = 
-    version 
-      "ocaml version constraint" 
-      "ocaml" 
-      version_cmp 
-      ocaml_version
-  ;;
+  let all = 
+    [
+      prefix;
+      exec_prefix;
+      bindir;
+      sbindir;
+      libexecdir;
+      sysconfdir;
+      sharedstatedir;
+      localstatedir;
+      libdir;
+      datarootdir;
+      datadir;
+      infodir;
+      localedir;
+      mandir;
+      docdir;
+      htmldir;
+      dvidir;
+      pdfdir;
+      psdir;
+      ocamlfind;
+      ocamlc;
+      ocamlopt;
+      ocamlbuild;
+      ocamlbest;
+      ocaml_version;
+      standard_library_default;
+      standard_library;
+      standard_runtime;
+      ccomp_type;
+      bytecomp_c_compiler;
+      native_c_compiler;
+      architecture;
+      model;
+      system;
+      ext_obj;
+      ext_asm;
+      ext_lib;
+      ext_dll;
+      os_type;
+      default_executable_name;
+      systhread_supported;
+      suffix_program;
+    ]
 end;;
 
 module BaseFileAB =
 struct
-# 1 "src/base/BaseFileAB.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseFileAB.ml"
   
   (** File .ab which content will be replaced by environment variable
      
@@ -1462,7 +1587,7 @@ struct
       @author Sylvain Le Gall
     *)
   
-  open BaseEnvironment;;
+  open BaseEnvRW;;
   
   let to_filename fn =
     if not (Filename.check_suffix fn ".ab") then
@@ -1476,9 +1601,6 @@ struct
   (** Replace variable in file %.ab to generate %
     *)
   let replace fn_lst env =
-    let renv =
-      ref env
-    in
     let buff =
       Buffer.create 13
     in
@@ -1493,7 +1615,7 @@ struct
              (
                try
                  while true do
-                  Buffer.add_string buff (var_expand renv (input_line chn_in));
+                  Buffer.add_string buff (var_expand env (input_line chn_in));
                   Buffer.add_char buff '\n'
                  done
                with End_of_file ->
@@ -1503,23 +1625,21 @@ struct
              Buffer.clear buff;
              close_in chn_in;
              close_out chn_out)
-        fn_lst;
-      !renv
+        fn_lst
   ;;
 end;;
 
 module BaseSetup =
 struct
-# 1 "src/base/BaseSetup.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/base/BaseSetup.ml"
   
   (** Entry point for ocaml-autobuild
       @author Sylvain Le Gall
     *)
   
-  module Env = BaseEnvironment
-  ;;
+  open BaseEnvRW;;
   
-  type action_fun = Env.env -> string array -> unit;;
+  type action_fun = env_t -> string array -> unit;;
   
   type t =
       {
@@ -1544,7 +1664,7 @@ struct
            (BaseMessage.info 
               (Printf.sprintf "Remove '%s'" fn);
             Sys.remove fn))
-      (Env.filename :: t.files_generated);
+      (BaseEnvRO.default_filename :: t.files_generated);
     t.distclean ()
   ;;
   
@@ -1570,9 +1690,13 @@ struct
               (fun () ->
                  (* Build initial environment *)
                  let env_org =
-                   Env.load ~allow_empty:configure ()
+                   load ~allow_empty:configure ()
                  in
-                   act  := (fun () -> a env_org (Array.of_list (List.rev !args)));
+                   act :=
+                   (let args =
+                      !args 
+                    in
+                      fun () -> a env_org (Array.of_list (List.rev args)));
                    args := []); 
           ]
       in
@@ -1619,64 +1743,77 @@ struct
 end;;
 
 
-# 1622 "setup.ml"
+# 1747 "setup.ml"
 module InternalConfigure =
 struct
-# 1 "src/internal/InternalConfigure.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/internal/InternalConfigure.ml"
   
   (** Configure using ocaml-autobuild internal scheme
       @author Sylvain Le Gall
     *)
   
-  module Msg = BaseMessage;;
-  module Env = BaseEnvironment;;
+  open BaseEnvRW;;
+  open BaseExpr;;
   
   (** Build environment using provided series of check to be done
     * and then output corresponding file.
     *)
-  let configure pkg_name pkg_version args checks ab_files env_org argv =
+  let configure pkg_name pkg_version flags cond_checks ab_files env argv =
   
-    let env = 
-      List.fold_left
-        (fun env (nm, vl) -> Env.var_define nm (fun env -> vl, env) env)
-        env_org
-        [
-          "pkg_name", pkg_name;
-          "pkg_version", pkg_version;
-        ]
-    in
+    (** Initialize flags *)
+    List.iter 
+      (fun (nm, hlp, choices) ->
+         let apply ?short_desc () = 
+             var_set
+               ?short_desc
+               ~cli:CLIAuto
+               ODefault
+               nm 
+               (lazy (choose choices env))
+               env
+         in
+           match hlp with 
+             | Some hlp ->
+                 apply ~short_desc:hlp ()
+             | None ->
+                 apply ())
+      (("pkg_name",    Some "Package name", (singleton pkg_name)) :: 
+       ("pkg_version", Some "Package version", (singleton pkg_version)) ::
+       flags);
+  
+    (** Initialize standard variables *)
+    List.iter 
+      (fun v -> var_ignore (v env))
+      BaseStandardVar.all;
+  
     (* Parse command line *)
-    let env =
-      BaseArgExt.parse argv (BaseArgExt.default :: args) env
-    in
+    BaseArgExt.parse argv (args env) env;
   
     (* Do some check *)
-    let env =
-      BaseCheck.run checks env
-    in
+    List.iter
+      (fun (cond, checks) ->
+         if BaseExpr.choose cond env then
+           BaseCheck.run checks env)
+      cond_checks;
   
     (* Replace data in file *)
-    let env =
-      BaseFileAB.replace
-        ab_files
-        env
-    in
+    BaseFileAB.replace ab_files env;
   
-      if not (Env.equal env_org env) then
-        (
-          Env.dump env;
-          Env.print env
-        )
+    dump env;
+    print env
   ;;
 end;;
 
 module InternalInstall =
 struct
-# 1 "src/internal/InternalInstall.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/internal/InternalInstall.ml"
   
   (** Install using ocaml-autobuild internal scheme
       @author Sylvain Le Gall
     *)
+  
+  open BaseEnvRW;;
+  open BaseStandardVar;;
   
   type library =
       {
@@ -1690,10 +1827,22 @@ struct
   
   type executable =
       {
-        exec_name:    string;
-        exec_install: bool BaseExpr.choices;
-        exec_path:    string;
+        exec_filename: string;
+        exec_install:  bool BaseExpr.choices;
       }
+  ;;
+  
+  let srcdir =
+    var_define
+      "srcdir"
+      (lazy ".")
+  ;;
+  
+  let builddir env =
+    var_define
+      "builddir"
+      (lazy (Filename.concat (srcdir env) "_build"))
+      env
   ;;
   
   let exec_hook =
@@ -1706,28 +1855,8 @@ struct
   
   let install libs execs env argv =
     
-    let srcdir = 
-      (* TODO: don't hardcode this *)
-      "."
-    in
-  
-    let builddir =
-      (* TODO: don't hardcode this *)
-      Filename.concat srcdir "_build"
-    in
-  
-    let exec_ext =
-      (* TODO: don't hardcode this *)
-      ""
-    in
-  
-    let bindir =
-      (* TODO: don't hardcode this *)
-      "/usr/bin"
-    in
-  
     let rootdirs =
-      [srcdir; builddir]
+      [srcdir env; builddir env]
     in
   
     let ( * ) lst1 lst2 = 
@@ -1776,7 +1905,7 @@ struct
       let lib =
         !lib_hook env lib
       in
-      let (install, _) =
+      let install =
         BaseExpr.choose lib.lib_install env
       in
         if install then
@@ -1833,20 +1962,20 @@ struct
       let exec =
         !exec_hook env exec
       in
-      let (install, _) = 
+      let install = 
         BaseExpr.choose exec.exec_install env
       in
         if install then
           (
             let exec_file =
               find_file
-                (fun ((rootdir, name), ext) -> [rootdir; name^ext])
-                (rootdirs * [exec.exec_name] * [".native"; ".byte"; ""; exec_ext])
+                (fun rootdir -> [rootdir; exec.exec_filename^(suffix_program env)])
+                rootdirs
             in
             let tgt_file =
               Filename.concat 
-                bindir
-                exec.exec_name
+                (bindir env)
+                (Filename.basename exec.exec_filename)
             in
               BaseMessage.info 
                 (Printf.sprintf 
@@ -1864,16 +1993,24 @@ struct
 end;;
 
 
-# 1867 "setup.ml"
+# 1997 "setup.ml"
 module OCamlbuildBuild =
 struct
-# 1 "src/ocamlbuild/OCamlbuildBuild.ml"
+# 1 "/home/gildor/programmation/ocaml-autobuild/src/ocamlbuild/OCamlbuildBuild.ml"
   
   (** Runtime support for autobuild/OCamlbuild
       @author Sylvain Le Gall
     *)
   
-  module Env = BaseEnvironment 
+  open BaseStandardVar;;
+  
+  type target =
+    | Std of string
+    | Rename of string * string
+  ;;
+  
+  type t = 
+    (target BaseExpr.choices) list
   ;;
   
   let cond_targets_hook =
@@ -1881,53 +2018,70 @@ struct
   ;;
   
   let build cond_targets env argv =
-    let rtargets, env =
+    (* Fix special arguments depending on environment *)
+    let env_args =
+      List.flatten
+        [
+          if (os_type env) = "Win32" then
+            [
+              "-classic-display"; 
+              "-no-log"; 
+              "-install-lib-dir"; 
+              (Filename.concat (standard_library env) "ocamlbuild")
+            ] 
+          else
+            [];
+      
+          if (ocamlbest env) = "byte" || (os_type env) = "Win32" then
+            [
+              "-byte-plugin" 
+            ]
+          else
+            [];
+        ]
+    in
+  
+    let ocamlbuild_run rtargets = 
+      let args = 
+        List.rev_append rtargets (Array.to_list argv)
+      in
+        BaseExec.run (ocamlbuild env) (env_args @ args)
+    in
+  
+    let in_build_dir fn =
+      Filename.concat "_build" fn
+    in
+  
+    let last_rtargets =
       List.fold_left
-        (fun (acc, env) (choices, tgt) ->
-           let choice, env =
-             BaseExpr.choose choices env
-           in
-             (if choice then tgt :: acc else acc), env)
-        ([], env)
+        (fun acc (choices, tgt) ->
+           if BaseExpr.choose choices env then 
+             match tgt with 
+               | Std nm -> 
+                   nm :: acc
+               | Rename (src, tgt) ->
+                   ocamlbuild_run (src :: acc);
+                   BaseFileUtil.cp 
+                     (in_build_dir src) 
+                     (in_build_dir tgt);
+                   []
+           else
+             acc)
+        []
         (!cond_targets_hook cond_targets)
     in
-    let eget =
-      Env.get env
-    in
-    let ocamlbuild = 
-      eget "ocamlbuild"
-    in
-    let args = 
-      List.rev_append rtargets (Array.to_list argv)
-    in
-    let args =
-      if (eget "os_type") = "Win32" then
-        [
-          "-classic-display"; 
-          "-no-log"; 
-          "-install-lib-dir"; 
-          (Filename.concat (eget "ocaml_stdlib") "ocamlbuild")
-        ] @ args
-      else
-        args
-    in
-    let args =
-      if (eget "ocamlbest") = "byte" || (eget "os_type") = "Win32" then
-        "-byte-plugin" :: args
-      else
-        args
-    in
-      BaseExec.run ocamlbuild args
+      ocamlbuild_run last_rtargets
   ;;
   
   let clean () = 
+    (* TODO use ocamlbuild *)
     BaseExec.run "ocamlbuild" ["-clean"]
   ;;
   
 end;;
 
 
-# 1930 "setup.ml"
+# 2085 "setup.ml"
 let setup () =
   BaseSetup.setup
     {
@@ -1945,10 +2099,9 @@ let setup () =
            ]
            [
              {
-               InternalInstall.exec_name = ("OCamlTee");
+               InternalInstall.exec_filename = ("src/OCamlTee");
                InternalInstall.exec_install =
                  ([(BaseExpr.Bool true, true); (BaseExpr.Bool true, true)]);
-               InternalInstall.exec_path = ("src");
                }
            ]);
       BaseSetup.test = (fun _ _ -> failwith "No implementation for test");
@@ -1956,13 +2109,14 @@ let setup () =
       BaseSetup.build =
         (OCamlbuildBuild.build
            [
-             ([(BaseExpr.Bool true, true)], "src/tee.cma");
+             ([(BaseExpr.Bool true, true)], OCamlbuildBuild.Std "src/tee.cma");
              ([
                 (BaseExpr.Bool true, true);
                 (BaseExpr.Test ("ocamlbest", "byte"), false)
               ],
-               "src/tee.cmxa");
-             ([(BaseExpr.Bool true, true)], "src/OCamlTee.byte")
+               OCamlbuildBuild.Std "src/tee.cmxa");
+             ([(BaseExpr.Bool true, true)],
+               OCamlbuildBuild.Rename ("src/OCamlTee.byte", "src/OCamlTee"))
            ]);
       BaseSetup.configure =
         (InternalConfigure.configure
@@ -1970,11 +2124,10 @@ let setup () =
            "0.0.1"
            []
            [
-             BaseCheck.package "unix";
-             BaseCheck.prog "ocamlbuild";
-             BaseStandardVar.ocamlbest;
-             BaseStandardVar.standard_library;
-             BaseStandardVar.os_type
+             ([(BaseExpr.Bool true, true)],
+               [BaseCheck.prog "ocamlbuild"; BaseCheck.package "unix"]);
+             ([(BaseExpr.Bool true, true)], [BaseCheck.package "camlp4"]);
+             ([(BaseExpr.Bool true, true)], [])
            ]
            []);
       BaseSetup.clean = (fun () -> OCamlbuildBuild.clean ());

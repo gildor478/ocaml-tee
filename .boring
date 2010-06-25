@@ -67,6 +67,5 @@
 \_vti_cnf$
 \_vti_pvt$
 ^_build($|/)
-^buildsys.data$
-^myocamlbuild.ml$
-^ocaml-tee.itarget$
+^setup.data$
+^setup.log$
