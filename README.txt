@@ -1,4 +1,4 @@
-(* AUTOBUILD_START *)
+(* OASIS_START *)
 (* DO NOT EDIT (digest: 5c6d815443801b17152c1c6b915ffa39) *)
 This is the README file for the ocaml-tee distribution.
 
@@ -16,4 +16,4 @@ file COPYING.txt for copying conditions.
 Home page: http://ocaml-tee.forge.ocamlcore.org
 
 
-(* AUTOBUILD_STOP *)
+(* OASIS_STOP *)

@@ -1,4 +1,4 @@
-# AUTOBUILD_START
+# OASIS_START
 # DO NOT EDIT (digest: d6242f71f04183d72273ff8b478e7aea)
 # Library tee
 "src": include
@@ -6,5 +6,5 @@
 # Executable OCamlTee
 "src/OCamlTee.byte": pkg_unix
 <src/*.ml{,i}>: pkg_unix
-# AUTOBUILD_STOP
+# OASIS_STOP
 <src/Tee.ml>: syntax_camlp4o

@@ -1,5 +1,5 @@
 
-(* AUTOBUILD_START *)
+(* OASIS_START *)
 (* DO NOT EDIT (digest: b162442f49d2a22e9181c054ee926857) *)
 module BaseEnvLight = struct
 # 21 "/home/gildor/programmation/oasis/src/base/BaseEnvLight.ml"
@@ -343,6 +343,6 @@ let package_default =
 
 let dispatch_default = MyOCamlbuildBase.dispatch_default package_default;;
 
-(* AUTOBUILD_STOP *)
+(* OASIS_STOP *)
 
 Ocamlbuild_plugin.dispatch dispatch_default;;

@@ -1,4 +1,4 @@
-(* AUTOBUILD_START *)
+(* OASIS_START *)
 (* DO NOT EDIT (digest: b7b273adcf713a2d757b3cfb1511aa94) *)
 module OASISGettext = struct
 # 21 "/home/gildor/programmation/oasis/src/oasis/OASISGettext.ml"
@@ -5282,5 +5282,5 @@ let dev_t = {BaseDev.oasis_cmd = "OASIS"; };;
 
 let setup () = BaseDev.update_and_run dev_t;;
 
-(* AUTOBUILD_STOP *)
+(* OASIS_STOP *)
 setup ();;

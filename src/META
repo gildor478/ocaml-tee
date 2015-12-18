@@ -1,8 +1,8 @@
-# AUTOBUILD_START
+# OASIS_START
 # DO NOT EDIT (digest: 405959d9191ac8ced6cf092026e8e89a)
 version = "0.0.1"
 description = "Redirect command output to a file"
 requires = "unix camlp4"
 archive(byte) = "tee.cma"
 archive(native) = "tee.cmxa"
-# AUTOBUILD_STOP
+# OASIS_STOP

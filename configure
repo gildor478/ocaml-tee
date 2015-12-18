@@ -1,8 +1,8 @@
 #!/bin/sh
 
-# AUTOBUILD_START
+# OASIS_START
 # DO NOT EDIT (digest: ed33e59fe00e48bc31edf413bbc8b8d6)
 set -e
 
 ocaml setup.ml -configure $*
-# AUTOBUILD_STOP
+# OASIS_STOP

@@ -1,5 +1,5 @@
 
-# AUTOBUILD_START
+# OASIS_START
 # DO NOT EDIT (digest: bc1e05bfc8b39b664f29dae8dbd3ebbb)
 
 SETUP = ocaml setup.ml
@@ -36,4 +36,4 @@ setup.data:
 
 .PHONY: build doc test all install uninstall reinstall clean distclean configure
 
-# AUTOBUILD_STOP
+# OASIS_STOP

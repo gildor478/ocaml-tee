@@ -1,4 +1,4 @@
-(* AUTOBUILD_START *)
+(* OASIS_START *)
 (* DO NOT EDIT (digest: 3782d866dd867ab99d54a75f387a05d6) *)
 This is the INSTALL file for the ocaml-tee distribution.
 
@@ -33,4 +33,4 @@ OASIS is a software that helps to write setup.ml using a simple '_oasis'
 configuration file. The generated setup only depends on standard OCaml
 installation, no additional library is required.
 
-(* AUTOBUILD_STOP *)
+(* OASIS_STOP *)
